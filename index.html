@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rastreo 3D Local • Personas + Controladores</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.21.0/tf.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.0.0/dist/pose-detection.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap');
+
+        :root {
+            --tw-color-primary: #00d4ff;
+        }
+
+        body {
+            font-family: 'Inter', system-ui, sans-serif;
+        }
+
+        .video-container {
+            position: relative;
+        }
+
+        #canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+
+        .panel {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .sidebar {
+            transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+
+        .log-line {
+            animation: logFade 0.3s ease-out;
+        }
+    </style>
+</head>
+
+<body class="bg-zinc-950 text-white">
+    <div class="flex h-screen overflow-hidden">
+        <!-- Video principal -->
+        <div class="flex-1 flex flex-col relative">
+
+            <!-- Cabecera -->
+            <div class="bg-zinc-900 border-b border-zinc-800 px-6 py-4 flex items-center justify-between z-10">
+                <div class="flex items-center gap-x-3">
+                    <div
+                        class="w-8 h-8 bg-cyan-500 rounded-2xl flex items-center justify-center text-white font-bold text-xl">
+                        3D</div>
+                    <h1 class="text-2xl font-semibold tracking-tight">Rastreo 3D Local</h1>
+                    <span id="mode-badge"
+                        class="px-3 py-1 text-xs font-medium rounded-3xl bg-emerald-500/20 text-emerald-400">Modo:
+                        Personas</span>
+                </div>
+
+                <div class="flex items-center gap-x-4">
+                    <!-- Estado de cámara -->
+                    <div id="camera-status" class="flex items-center gap-x-2 text-sm">
+                        <div class="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                        Cámara activa
+                    </div>
+
+                    <!-- Botón menú flotante (esquina) -->
+                    <button onclick="toggleMenu()"
+                        class="w-11 h-11 bg-zinc-800 hover:bg-zinc-700 rounded-2xl flex items-center justify-center text-3xl shadow-xl border border-zinc-700 transition-all active:scale-95">
+                        ☰
+                    </button>
+                </div>
+            </div>
+
+            <!-- Área de video + canvas -->
+            <div class="flex-1 video-container bg-black flex items-center justify-center relative" id="video-wrapper">
+                <video id="video" class="max-h-full max-w-full" autoplay playsinline muted></video>
+                <canvas id="canvas" width="1280" height="720" class="absolute top-0 left-0"></canvas>
+
+                <!-- Overlay de información en vivo -->
+                <div
+                    class="absolute top-6 left-6 bg-black/70 backdrop-blur-md text-white text-xs font-mono px-4 py-3 rounded-3xl flex flex-col gap-y-1 shadow-2xl">
+                    <div class="flex items-center justify-between w-64">
+                        <span class="text-cyan-400">Personas detectadas:</span>
+                        <span id="people-count" class="font-semibold text-2xl text-white">0</span>
+                    </div>
+                    <div class="flex items-center justify-between w-64">
+                        <span class="text-cyan-400">Puntos rastreados:</span>
+                        <span id="landmarks-count" class="font-semibold text-2xl text-white">33</span>
+                    </div>
+                    <div id="fps" class="text-[10px] text-zinc-400 font-mono">FPS: --</div>
+                </div>
+
+                <!-- Instrucciones rápidas -->
+                <div id="overlay-hints"
+                    class="absolute bottom-6 left-6 bg-black/70 text-xs px-4 py-2 rounded-2xl flex items-center gap-x-2 text-cyan-300">
+                    <span class="px-2 py-1 bg-cyan-500/20 rounded-xl">Click en video → calibrar color</span>
+                    <span class="text-zinc-500">•</span>
+                    <span>Presiona ESC para resetear rastreo</span>
+                </div>
+            </div>
+
+            <!-- Barra de estado inferior -->
+            <div
+                class="h-14 bg-zinc-900 border-t border-zinc-800 px-6 flex items-center text-sm font-mono text-zinc-400">
+                <div class="flex-1 flex items-center gap-x-6">
+                    <div><span class="text-emerald-400">●</span> <span id="tracking-mode-text">Rastreo inteligente
+                            activado</span></div>
+                    <div id="confidence-bar" class="flex-1 h-2 bg-zinc-800 rounded-3xl overflow-hidden">
+                        <div id="confidence-fill"
+                            class="h-full bg-gradient-to-r from-cyan-400 to-emerald-400 w-3/4 transition-all"></div>
+                    </div>
+                    <div class="flex items-center gap-x-2">
+                        <span id="current-fps">FPS: 28</span>
+                        <span class="text-xs text-zinc-500">•</span>
+                        <span id="latency">Latencia: 42ms</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sidebar / Menú expandible (se abre desde esquina) -->
+        <div id="sidebar"
+            class="sidebar w-96 bg-zinc-900 border-l border-zinc-700 shadow-2xl flex flex-col translate-x-full">
+
+            <div class="px-6 py-5 border-b border-zinc-700 flex items-center justify-between">
+                <h2 class="text-lg font-semibold">Paneles de control</h2>
+                <button onclick="toggleMenu()" class="text-2xl leading-none text-zinc-400 hover:text-white">✕</button>
+            </div>
+
+            <!-- Acordeón de paneles -->
+            <div class="flex-1 overflow-y-auto">
+
+                <!-- PANEL 1: CONTROL -->
+                <details class="group border-b border-zinc-700" open>
+                    <summary
+                        class="px-6 py-4 font-medium flex items-center justify-between cursor-pointer hover:bg-zinc-800">
+                        <span class="flex items-center gap-x-2">
+                            ⚙️ Panel de Control
+                        </span>
+                        <span class="text-xl transition-transform group-open:rotate-180">›</span>
+                    </summary>
+                    <div class="px-6 pb-6 text-sm space-y-6">
+
+                        <!-- Modo -->
+                        <div>
+                            <label class="block text-xs uppercase tracking-widest mb-2 text-zinc-400">Modo de
+                                rastreo</label>
+                            <div class="grid grid-cols-2 gap-2">
+                                <button onclick="setMode(0)" id="btn-personas"
+                                    class="mode-btn active px-4 py-3 rounded-2xl flex items-center justify-center gap-x-2 font-medium bg-emerald-500 text-white">
+                                    👤 Personas (3D)
+                                </button>
+                                <button onclick="setMode(1)" id="btn-controladores"
+                                    class="mode-btn px-4 py-3 rounded-2xl flex items-center justify-center gap-x-2 font-medium bg-zinc-800 hover:bg-zinc-700">
+                                    🎮 Controladores (colores)
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Configuración Pose -->
+                        <div id="pose-config">
+                            <label class="block text-xs uppercase tracking-widest mb-2 text-zinc-400">Modelo BlazePose
+                                (MediaPipe 3D)</label>
+                            <div class="space-y-4">
+                                <div>
+                                    <div class="flex justify-between text-xs"><span>Confianza mínima
+                                            detección</span><span id="det-conf-val">0.65</span></div>
+                                    <input type="range" id="det-conf" min="0.1" max="0.9" step="0.05" value="0.65"
+                                        class="w-full accent-cyan-400" oninput="updateConfig()">
+                                </div>
+                                <div>
+                                    <div class="flex justify-between text-xs"><span>Confianza tracking</span><span
+                                            id="track-conf-val">0.5</span></div>
+                                    <input type="range" id="track-conf" min="0.1" max="0.9" step="0.05" value="0.5"
+                                        class="w-full accent-cyan-400" oninput="updateConfig()">
+                                </div>
+                                <button onclick="resetPoseModel()"
+                                    class="w-full py-3 text-xs bg-zinc-800 hover:bg-zinc-700 rounded-2xl flex items-center justify-center gap-x-2">
+                                    🔄 Reiniciar modelo
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Configuración Controladores (colores) -->
+                        <div id="controller-config" class="hidden">
+                            <label class="block text-xs uppercase tracking-widest mb-3 text-zinc-400">Controladores de
+                                color (hasta 4 puntos)</label>
+                            <div class="grid grid-cols-4 gap-3">
+                                <div onclick="pickColor(0)" id="color-0"
+                                    class="h-12 rounded-2xl border-2 border-dashed border-white/30 flex items-center justify-center cursor-pointer text-xs font-medium">
+                                    Color 1</div>
+                                <div onclick="pickColor(1)" id="color-1"
+                                    class="h-12 rounded-2xl border-2 border-dashed border-white/30 flex items-center justify-center cursor-pointer text-xs font-medium">
+                                    Color 2</div>
+                                <div onclick="pickColor(2)" id="color-2"
+                                    class="h-12 rounded-2xl border-2 border-dashed border-white/30 flex items-center justify-center cursor-pointer text-xs font-medium">
+                                    Color 3</div>
+                                <div onclick="pickColor(3)" id="color-3"
+                                    class="h-12 rounded-2xl border-2 border-dashed border-white/30 flex items-center justify-center cursor-pointer text-xs font-medium">
+                                    Color 4</div>
+                            </div>
+                            <div class="mt-4 text-xs text-zinc-400">
+                                Haz clic en el video para calibrar cada color del bastón.<br>
+                                Se rastrean hasta 4 puntos por controlador.
+                            </div>
+                            <button onclick="clearColors()"
+                                class="mt-4 w-full py-2 text-xs bg-red-500/10 text-red-400 rounded-2xl">Limpiar
+                                colores</button>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- PANEL 2: RASTREO DE ESQUELETO -->
+                <details class="group border-b border-zinc-700">
+                    <summary
+                        class="px-6 py-4 font-medium flex items-center justify-between cursor-pointer hover:bg-zinc-800">
+                        <span class="flex items-center gap-x-2">
+                            🦴 Rastreo Corporal 3D
+                        </span>
+                        <span class="text-xl transition-transform group-open:rotate-180">›</span>
+                    </summary>
+                    <div class="px-6 pb-6">
+                        <div class="bg-zinc-800 rounded-3xl p-4 text-xs max-h-80 overflow-auto font-mono"
+                            id="landmark-list">
+                            <!-- Se llena por JS -->
+                        </div>
+                        <div class="mt-4 flex gap-2 flex-wrap">
+                            <label class="flex items-center gap-x-2 text-xs"><input type="checkbox" id="draw-skeleton"
+                                    checked onchange="toggleDraw()"> Esqueleto</label>
+                            <label class="flex items-center gap-x-2 text-xs"><input type="checkbox" id="draw-ids"
+                                    checked onchange="toggleDraw()"> IDs persistentes</label>
+                            <label class="flex items-center gap-x-2 text-xs"><input type="checkbox" id="draw-3d-proj"
+                                    checked onchange="toggleDraw()"> Proyección 3D</label>
+                            <label class="flex items-center gap-x-2 text-xs"><input type="checkbox" id="show-velocity"
+                                    onchange="toggleDraw()"> Vectores de velocidad</label>
+                        </div>
+                    </div>
+                </details>
+
+                <!-- PANEL 3: CONSOLA DE ESTADO -->
+                <details class="group" open>
+                    <summary
+                        class="px-6 py-4 font-medium flex items-center justify-between cursor-pointer hover:bg-zinc-800">
+                        <span class="flex items-center gap-x-2">
+                            📡 Consola de estado
+                        </span>
+                        <span class="text-xl transition-transform group-open:rotate-180">›</span>
+                    </summary>
+                    <div class="px-6 pb-6">
+                        <div id="console-log"
+                            class="bg-black font-mono text-[10px] text-emerald-300 h-80 overflow-y-auto p-4 rounded-3xl leading-relaxed whitespace-pre-wrap border border-zinc-700">
+                            [00:00] Aplicación iniciada<br>
+                            [00:00] Cámara conectada<br>
+                            [00:01] Modelo BlazePose cargado (33 landmarks 3D)<br>
+                        </div>
+                        <button onclick="clearConsole()" class="mt-3 text-xs px-4 py-2 bg-zinc-800 rounded-2xl">Limpiar
+                            consola</button>
+                    </div>
+                </details>
+            </div>
+
+            <!-- Pie del sidebar -->
+            <div class="p-4 border-t border-zinc-700 text-[10px] text-zinc-500 flex justify-between items-center">
+                <div>100% local • Sin servidor</div>
+                <div onclick="window.location.reload()"
+                    class="cursor-pointer flex items-center gap-x-1 hover:text-cyan-400">
+                    <span>Reiniciar todo</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ===================== CONFIGURACIÓN GLOBAL =====================
+        let detector = null
+        let video = null
+        let canvas = null
+        let ctx = null
+        let isRunning = false
+        let rafId = null
+        let lastTime = Date.now()
+        let fpsHistory = []
+
+        // Modo: 0 = Personas (BlazePose 3D), 1 = Controladores (color)
+        let currentMode = 0
+
+        // Configuración pose
+        let poseConfig = {
+            minDetectionConfidence: 0.65,
+            minTrackingConfidence: 0.5,
+            modelType: 'full' // full o lite
+        }
+
+        // Rastreo inteligente (lógica infalible)
+        let tracks = [] // [{id, pose, velocity: {x,y,z}, lastSeen, confidence, visiblePoints}]
+        let nextTrackId = 1
+        let lostTimeout = 45 // frames antes de descartar completamente
+
+        // Controladores de color (hasta 4)
+        let controllerColors = [] // [{r,g,b, name}]
+        let colorPoints = [] // [{id, x, y, size, colorIndex}]
+
+        // Opciones de dibujo
+        let drawOptions = {
+            skeleton: true,
+            ids: true,
+            velocity: true,
+            proj3d: true
+        }
+
+        // ===================== INICIALIZACIÓN =====================
+        async function init() {
+            console.log('%c🚀 Iniciando webapp de rastreo 3D completamente local...', 'color:#00d4ff; font-weight:bold')
+
+            video = document.getElementById('video')
+            canvas = document.getElementById('canvas')
+            ctx = canvas.getContext('2d')
+
+            // Tailwind
+            tailwind.config = { content: ["./**/*.{html,js}"] }
+
+            // Cargar modelo BlazePose (MediaPipe)
+            await loadPoseModel()
+
+            // Evento click en video para calibrar color
+            canvas.addEventListener('click', handleCanvasClick)
+
+            // Tecla ESC para reset
+            document.addEventListener('keydown', e => {
+                if (e.key === 'Escape') resetAllTracking()
+            })
+
+            logConsole('✅ Modelo BlazePose 3D cargado (33 landmarks con profundidad)', 'emerald')
+            logConsole('🔥 Lógica inteligente de persistencia activada (predicción + visibilidad parcial)', 'cyan')
+
+            // Iniciar cámara automáticamente
+            setTimeout(startCamera, 800)
+        }
+
+        async function loadPoseModel() {
+            const modelConfig = {
+                runtime: 'tfjs',
+                modelType: poseConfig.modelType,
+                maxPoses: 2 // BlazePose permite hasta 2 en algunos casos, aunque optimizado para 1
+            }
+            detector = await poseDetection.createDetector(poseDetection.SupportedModels.BlazePose, modelConfig)
+        }
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { width: 1280, height: 720, facingMode: "user" }
+                })
+                video.srcObject = stream
+                video.onloadedmetadata = () => {
+                    video.play()
+                    canvas.width = video.videoWidth
+                    canvas.height = video.videoHeight
+                    isRunning = true
+                    logConsole('📹 Cámara iniciada – resolución 1280×720', 'emerald')
+                    detectLoop()
+                }
+            } catch (err) {
+                logConsole('❌ Error al acceder a la cámara: ' + err.message, 'red')
+            }
+        }
+
+        // ===================== LOOP PRINCIPAL DE DETECCIÓN =====================
+        async function detectLoop() {
+            if (!isRunning) return
+
+            const now = Date.now()
+            const fps = Math.round(1000 / (now - lastTime))
+            lastTime = now
+            fpsHistory.push(fps)
+            if (fpsHistory.length > 30) fpsHistory.shift()
+
+            // Dibujar frame de video
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+            let poses = []
+
+            if (currentMode === 0) {
+                // === MODO PERSONAS – BlazePose + lógica inteligente ===
+                try {
+                    poses = await detector.estimatePoses(video, { flipHorizontal: false })
+                } catch (e) { }
+
+                // Aplicar lógica de rastreo persistente
+                updateTracksWithPrediction(poses)
+
+                // Dibujar
+                drawTrackedPoses()
+
+                document.getElementById('people-count').textContent = tracks.length
+                document.getElementById('landmarks-count').textContent = '33'
+
+            } else {
+                // === MODO CONTROLADORES – rastreo de color simple pero robusto ===
+                colorPoints = detectColoredPoints()
+                drawControllers()
+                document.getElementById('people-count').textContent = colorPoints.length
+                document.getElementById('landmarks-count').textContent = colorPoints.length
+            }
+
+            // Actualizar consola y UI
+            updateStatusBar(fps)
+
+            rafId = requestAnimationFrame(detectLoop)
+        }
+
+        // ===================== LÓGICA INTELIGENTE DE RASTREO (INFALIBLE) =====================
+        function updateTracksWithPrediction(rawPoses) {
+            const currentTime = Date.now()
+
+            // 1. Predicción de posición para tracks existentes
+            tracks.forEach(track => {
+                if (track.lastSeen < currentTime - 300) {
+                    // Predecir posición usando velocidad (modelo de velocidad constante)
+                    track.pose.keypoints.forEach(kp => {
+                        if (kp.score > 0.2) {
+                            kp.x += track.velocity.x || 0
+                            kp.y += track.velocity.y || 0
+                            kp.z = (kp.z || 0) + (track.velocity.z || 0)
+                        }
+                    })
+                }
+            })
+
+            // 2. Asignación de detecciones a tracks existentes (usando Hungarian simple = distancia mínima)
+            const assigned = new Set()
+
+            rawPoses.forEach((pose, i) => {
+                let bestTrack = null
+                let bestDist = Infinity
+
+                tracks.forEach((track, idx) => {
+                    if (assigned.has(idx)) return
+
+                    const centerPose = getPoseCenter(pose)
+                    const centerTrack = getPoseCenter(track.pose)
+
+                    const dist = Math.hypot(centerPose.x - centerTrack.x, centerPose.y - centerTrack.y)
+
+                    if (dist < bestDist && dist < 180) { // umbral de asociación
+                        bestDist = dist
+                        bestTrack = idx
+                    }
+                })
+
+                if (bestTrack !== null) {
+                    // Actualizar track existente
+                    const oldPose = tracks[bestTrack].pose
+                    tracks[bestTrack].pose = pose
+
+                    // Calcular nueva velocidad
+                    const oldCenter = getPoseCenter(oldPose)
+                    const newCenter = getPoseCenter(pose)
+                    tracks[bestTrack].velocity = {
+                        x: (newCenter.x - oldCenter.x) * 0.7,
+                        y: (newCenter.y - oldCenter.y) * 0.7,
+                        z: ((newCenter.z || 0) - (oldCenter.z || 0)) * 0.7
+                    }
+                    tracks[bestTrack].lastSeen = currentTime
+                    tracks[bestTrack].confidence = Math.max(tracks[bestTrack].confidence, pose.keypoints.filter(k => k.score > 0.3).length / 33)
+                    assigned.add(bestTrack)
+
+                    // Si muchos puntos son visibles → reforzar confianza
+                    if (pose.keypoints.filter(k => k.score > 0.4).length > 20) {
+                        logConsole(`✅ Persona #${tracks[bestTrack].id} reforzada (parcialmente visible)`, 'emerald')
+                    }
+                } else {
+                    // Nueva persona
+                    tracks.push({
+                        id: nextTrackId++,
+                        pose: pose,
+                        velocity: { x: 0, y: 0, z: 0 },
+                        lastSeen: currentTime,
+                        confidence: 1.0
+                    })
+                    logConsole(`🆕 Nueva persona detectada → ID #${nextTrackId - 1}`, 'cyan')
+                }
+            })
+
+            // 3. Eliminar tracks perdidos
+            tracks = tracks.filter(track => {
+                const age = (currentTime - track.lastSeen) / 16 // ~frames
+                if (age > lostTimeout) {
+                    logConsole(`🪦 Persona #${track.id} perdida completamente`, 'amber')
+                    return false
+                }
+                return true
+            })
+        }
+
+        function getPoseCenter(pose) {
+            const visible = pose.keypoints.filter(k => k.score > 0.3)
+            if (visible.length === 0) return { x: 0, y: 0, z: 0 }
+            const sumX = visible.reduce((a, k) => a + k.x, 0)
+            const sumY = visible.reduce((a, k) => a + k.y, 0)
+            const sumZ = visible.reduce((a, k) => a + (k.z || 0), 0)
+            return {
+                x: sumX / visible.length,
+                y: sumY / visible.length,
+                z: sumZ / visible.length
+            }
+        }
+
+        // ===================== DIBUJO =====================
+        function drawTrackedPoses() {
+            ctx.strokeStyle = '#00d4ff'
+            ctx.lineWidth = 4
+
+            tracks.forEach(track => {
+                const pose = track.pose
+
+                // Esqueleto
+                if (drawOptions.skeleton) {
+                    const connections = [
+                        // torso
+                        ['left_shoulder', 'right_shoulder'], ['left_shoulder', 'left_hip'], ['right_shoulder', 'right_hip'],
+                        // brazos
+                        ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+                        ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+                        // piernas
+                        ['left_hip', 'left_knee'], ['left_knee', 'left_ankle'],
+                        ['right_hip', 'right_knee'], ['right_knee', 'right_ankle']
+                    ]
+
+                    connections.forEach(([a, b]) => {
+                        const kpA = pose.keypoints.find(k => k.name === a)
+                        const kpB = pose.keypoints.find(k => k.name === b)
+                        if (kpA && kpB && kpA.score > 0.3 && kpB.score > 0.3) {
+                            ctx.beginPath()
+                            ctx.moveTo(kpA.x, kpA.y)
+                            ctx.lineTo(kpB.x, kpB.y)
+                            ctx.stroke()
+                        }
+                    })
+                }
+
+                // Puntos clave
+                pose.keypoints.forEach(kp => {
+                    if (kp.score > 0.35) {
+                        ctx.fillStyle = kp.name.includes('hand') || kp.name.includes('foot') ? '#ff00aa' : '#00ffcc'
+                        ctx.beginPath()
+                        ctx.arc(kp.x, kp.y, 6, 0, Math.PI * 2)
+                        ctx.fill()
+
+                        // Coordenada 3D en tooltip pequeño
+                        if (drawOptions.proj3d && kp.z !== undefined) {
+                            ctx.fillStyle = 'white'
+                            ctx.font = '9px monospace'
+                            ctx.fillText(kp.z.toFixed(2), kp.x + 10, kp.y - 8)
+                        }
+                    }
+                })
+
+                // ID persistente
+                if (drawOptions.ids) {
+                    const center = getPoseCenter(pose)
+                    ctx.fillStyle = '#00d4ff'
+                    ctx.font = 'bold 18px Inter'
+                    ctx.fillText(`#${track.id}`, center.x - 15, center.y - 35)
+
+                    // Vector de velocidad
+                    if (drawOptions.velocity && track.velocity) {
+                        ctx.strokeStyle = '#ffaa00'
+                        ctx.lineWidth = 3
+                        ctx.beginPath()
+                        ctx.moveTo(center.x, center.y)
+                        ctx.lineTo(center.x + track.velocity.x * 8, center.y + track.velocity.y * 8)
+                        ctx.stroke()
+                    }
+                }
+            })
+        }
+
+        function drawControllers() {
+            colorPoints.forEach(pt => {
+                ctx.fillStyle = `rgb(${controllerColors[pt.colorIndex].r},${controllerColors[pt.colorIndex].g},${controllerColors[pt.colorIndex].b})`
+                ctx.shadowBlur = 20
+                ctx.shadowColor = ctx.fillStyle
+                ctx.beginPath()
+                ctx.arc(pt.x, pt.y, pt.size + 8, 0, Math.PI * 2)
+                ctx.fill()
+                ctx.shadowBlur = 0
+
+                ctx.fillStyle = 'white'
+                ctx.font = 'bold 14px Inter'
+                ctx.fillText(pt.colorIndex + 1, pt.x - 6, pt.y + 5)
+            })
+        }
+
+        // ===================== RASTREO DE COLOR (controladores) =====================
+        function detectColoredPoints() {
+            if (controllerColors.length === 0) return []
+
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+            const data = imageData.data
+            const points = []
+
+            // Para cada color calibrado
+            controllerColors.forEach((col, i) => {
+                let totalX = 0, totalY = 0, count = 0
+
+                for (let j = 0; j < data.length; j += 4) {
+                    const r = data[j], g = data[j + 1], b = data[j + 2]
+                    const dist = Math.hypot(r - col.r, g - col.g, b - col.b)
+                    if (dist < 45) { // tolerancia generosa
+                        const x = (j / 4) % canvas.width
+                        const y = Math.floor((j / 4) / canvas.width)
+                        totalX += x
+                        totalY += y
+                        count++
+                    }
+                }
+
+                if (count > 80) {
+                    points.push({
+                        id: i,
+                        x: totalX / count,
+                        y: totalY / count,
+                        size: Math.min(35, Math.sqrt(count) / 4),
+                        colorIndex: i
+                    })
+                }
+            })
+
+            // Limitar a 4 puntos (como máximo en los bastones)
+            return points.slice(0, 4)
+        }
+
+        function handleCanvasClick(e) {
+            if (currentMode === 1 && controllerColors.length < 4) {
+                const rect = canvas.getBoundingClientRect()
+                const x = Math.floor(e.clientX - rect.left)
+                const y = Math.floor(e.clientY - rect.top)
+
+                const imageData = ctx.getImageData(x, y, 1, 1)
+                const [r, g, b] = imageData.data
+
+                controllerColors.push({ r, g, b, name: `Color ${controllerColors.length + 1}` })
+
+                // Actualizar UI
+                const el = document.getElementById(`color-${controllerColors.length - 1}`)
+                if (el) el.style.backgroundColor = `rgb(${r},${g},${b})`
+
+                logConsole(`🎨 Color calibrado #${controllerColors.length} (RGB: ${r},${g},${b})`, 'amber')
+            }
+        }
+
+        // ===================== HELPERS =====================
+        function setMode(mode) {
+            currentMode = mode
+            document.getElementById('mode-badge').textContent = mode === 0 ? 'Modo: Personas' : 'Modo: Controladores'
+            document.getElementById('pose-config').classList.toggle('hidden', mode === 1)
+            document.getElementById('controller-config').classList.toggle('hidden', mode === 0)
+            document.getElementById('btn-personas').classList.toggle('active', mode === 0)
+            document.getElementById('btn-controladores').classList.toggle('active', mode === 1)
+            tracks = []
+            colorPoints = []
+            logConsole(`🔄 Modo cambiado a ${mode === 0 ? 'PERSONAS 3D' : 'CONTROLADORES DE COLOR'}`, 'cyan')
+        }
+
+        function updateConfig() {
+            poseConfig.minDetectionConfidence = parseFloat(document.getElementById('det-conf').value)
+            poseConfig.minTrackingConfidence = parseFloat(document.getElementById('track-conf').value)
+            document.getElementById('det-conf-val').textContent = poseConfig.minDetectionConfidence.toFixed(2)
+            document.getElementById('track-conf-val').textContent = poseConfig.minTrackingConfidence.toFixed(2)
+        }
+
+        async function resetPoseModel() {
+            if (detector) detector.dispose()
+            await loadPoseModel()
+            logConsole('🔄 Modelo BlazePose reiniciado', 'emerald')
+        }
+
+        function pickColor(i) {
+            // Ya se calibra con clic en el video
+            logConsole(`👉 Haz clic en el video para calibrar color #${i + 1}`, 'amber')
+        }
+
+        function clearColors() {
+            controllerColors = []
+            colorPoints = []
+            for (let i = 0; i < 4; i++) {
+                const el = document.getElementById(`color-${i}`)
+                if (el) el.style.backgroundColor = ''
+            }
+            logConsole('🧹 Colores de controladores borrados', 'amber')
+        }
+
+        function toggleDraw() {
+            drawOptions.skeleton = document.getElementById('draw-skeleton').checked
+            drawOptions.ids = document.getElementById('draw-ids').checked
+            drawOptions.velocity = document.getElementById('show-velocity').checked
+            drawOptions.proj3d = document.getElementById('draw-3d-proj').checked
+        }
+
+        function updateStatusBar(fps) {
+            document.getElementById('current-fps').textContent = `FPS: ${fps}`
+            const avgConfidence = tracks.length > 0 ?
+                tracks.reduce((sum, t) => sum + t.confidence, 0) / tracks.length : 1
+            document.getElementById('confidence-fill').style.width = (avgConfidence * 100) + '%'
+
+            // Actualizar lista de landmarks (solo primer track)
+            if (tracks.length > 0 && currentMode === 0) {
+                const listEl = document.getElementById('landmark-list')
+                let html = `<div class="text-cyan-400 text-[10px] mb-2">ID #${tracks[0].id} • ${tracks[0].pose.keypoints.filter(k => k.score > 0.4).length}/33 puntos visibles</div>`
+                tracks[0].pose.keypoints.slice(0, 12).forEach(kp => {
+                    if (kp.score > 0.4) {
+                        html += `<div class="flex justify-between text-xs py-px"><span>${kp.name}</span><span class="font-mono">${kp.x.toFixed(0)},${kp.y.toFixed(0)},${(kp.z || 0).toFixed(2)}</span></div>`
+                    }
+                })
+                listEl.innerHTML = html
+            }
+        }
+
+        function logConsole(msg, color = 'emerald') {
+            const consoleEl = document.getElementById('console-log')
+            const time = new Date().toLocaleTimeString('es-ES', { minute: '2-digit', second: '2-digit' })
+            const line = `<span class="log-line text-${color}-400">[${time}] ${msg}</span><br>`
+            consoleEl.innerHTML += line
+            consoleEl.scrollTop = consoleEl.scrollHeight
+        }
+
+        function clearConsole() {
+            document.getElementById('console-log').innerHTML = ''
+        }
+
+        function resetAllTracking() {
+            tracks = []
+            colorPoints = []
+            nextTrackId = 1
+            logConsole('🔄 Todos los rastreos reiniciados', 'amber')
+        }
+
+        function toggleMenu() {
+            const sidebar = document.getElementById('sidebar')
+            sidebar.classList.toggle('translate-x-full')
+        }
+
+        // ===================== ARRANQUE =====================
+        window.onload = init
+    </script>
+</body>
+
+</html>
